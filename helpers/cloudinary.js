@@ -18,7 +18,7 @@ if (isCloudinaryEnabled) {
   });
 }
 
-const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || "perfectshop";
+const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || "images";
 
 /**
  * Upload a buffer (multer memoryStorage) or a local file path to Cloudinary.
