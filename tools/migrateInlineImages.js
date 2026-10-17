@@ -1,21 +1,20 @@
 /**
  * One-time migration: move base64 image data URIs stored in the database
  * (site settings logo/favicon/footer images, category images, ...) to
- * Cloudinary and replace them with the file URL. New saves are converted by helpers/inlineImages.js.
+ * files in UPLOAD_DIR and replace them with the file name. New saves are converted by helpers/inlineImages.js.
  *
  * Original values of every changed row are written to a backup JSON file
  * before anything is updated.
  *
  * Usage:
  *   node tools/migrateInlineImages.js --dry-run   # report only
- *   node tools/migrateInlineImages.js             # upload + update rows
+ *   node tools/migrateInlineImages.js             # save files + update rows
  */
 require("dotenv").config();
 
 const fs = require("fs");
 const path = require("path");
 const db = require("../models");
-const { isCloudinaryEnabled } = require("../helpers/cloudinary");
 const { replaceInlineImages } = require("../helpers/inlineImages");
 
 const dryRun = process.argv.includes("--dry-run");
@@ -41,12 +40,6 @@ const byteLength = (value) =>
   Buffer.byteLength(typeof value === "string" ? value : JSON.stringify(value ?? null));
 
 async function main() {
-  console.log(`Storage: ${isCloudinaryEnabled ? "Cloudinary" : "NOT CONFIGURED"}`);
-  if (!dryRun && !isCloudinaryEnabled) {
-    console.error("\nCloudinary is not configured (CLOUDINARY_CLOUD_NAME / _API_KEY / _API_SECRET). Nothing was changed.");
-    process.exit(1);
-  }
-
   const backup = [];
   const updates = [];
 

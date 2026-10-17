@@ -20,10 +20,7 @@ const routes = require("./app/routes");
 const ApiError = require("./error/ApiError");
 const userLogHistory = require("./app/middlewares/userLogHistory");
 const { initializeChatSocket } = require("./app/realtime/socket");
-const {
-  isCloudinaryEnabled,
-  cloudinaryUrlForLegacyFile,
-} = require("./helpers/cloudinary");
+const { UPLOAD_DIR } = require("./helpers/fileStorage");
 
 const {
   createCourierSyncWorker,
@@ -201,19 +198,17 @@ app.use(userLogHistory);
    STATIC FILES
 ======================== */
 
-app.use("/images", express.static(process.env.UPLOAD_DIR || "images"));
-
-// Older records store only "<uuid>.<ext>". Once those files are migrated to
-// Cloudinary (tools/migrateUploadsToCloudinary.js) they no longer exist on
-// disk, so redirect to the Cloudinary copy that keeps the same name.
-if (isCloudinaryEnabled) {
-  app.get("/images/:name", (req, res, next) => {
-    const name = path.basename(req.params.name);
-    const ext = path.extname(name).toLowerCase();
-    if (!ext) return next();
-    res.redirect(301, cloudinaryUrlForLegacyFile(name, ext));
-  });
-}
+app.use(
+  "/images",
+  express.static(UPLOAD_DIR, {
+    // Uploaded SVGs may contain scripts; sandbox them when opened directly.
+    setHeaders: (res, filePath) => {
+      if (filePath.toLowerCase().endsWith(".svg")) {
+        res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+      }
+    },
+  }),
+);
 
 /* ========================
    SWAGGER DOCS

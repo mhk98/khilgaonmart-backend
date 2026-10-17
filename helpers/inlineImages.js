@@ -1,14 +1,10 @@
 const crypto = require("crypto");
-const {
-  isCloudinaryEnabled,
-  uploadToCloudinary,
-} = require("./cloudinary");
-const ApiError = require("../error/ApiError");
+const { saveFile } = require("./fileStorage");
 
 // The admin panel reads image inputs with FileReader.readAsDataURL and sends
 // them as base64 strings. Stored as-is they bloat every public API response
-// (a single category image was 3 MB), so they are uploaded to Cloudinary and
-// only the URL is kept in the database.
+// (a single category image was 3 MB), so they are saved to disk and only the
+// file name is kept in the database.
 
 const EXTENSION_BY_MIME = {
   "image/jpeg": ".jpg",
@@ -18,7 +14,7 @@ const EXTENSION_BY_MIME = {
   "image/webp": ".webp",
   "image/x-icon": ".ico",
   "image/vnd.microsoft.icon": ".ico",
-  // Served from res.cloudinary.com, so SVG scripts can't run on our origin.
+  // /images serves SVGs with a sandbox CSP (server.js), so scripts can't run.
   "image/svg+xml": ".svg",
 };
 
@@ -33,13 +29,11 @@ const EMBEDDED_DATA_URI = new RegExp(`data:(${MIME_ALTERNATION});base64,[A-Za-z0
 
 const isInlineImage = (value) => typeof value === "string" && WHOLE_DATA_URI.test(value);
 
-const storeDataUri = async (dataUri, mime) => {
-  if (!isCloudinaryEnabled) {
-    throw new ApiError(500, "File storage is not configured (Cloudinary credentials missing)");
-  }
+// Returns the bare "<uuid>.<ext>" name, the same form multer uploads store.
+const storeDataUri = (dataUri, mime) => {
   const name = `${crypto.randomUUID()}${EXTENSION_BY_MIME[mime.toLowerCase()]}`;
-  const result = await uploadToCloudinary(dataUri.replace(/\s/g, ""), name);
-  return result.secure_url;
+  const base64 = dataUri.slice(dataUri.indexOf(",") + 1).replace(/\s/g, "");
+  return saveFile(Buffer.from(base64, "base64"), name);
 };
 
 const uploadOnce = (dataUri, mime, cache) => {
@@ -55,15 +49,16 @@ const replaceInString = async (value, cache) => {
 
   const matches = [...value.matchAll(EMBEDDED_DATA_URI)];
   if (!matches.length) return value;
-  const urls = await Promise.all(matches.map((m) => uploadOnce(m[0], m[1], cache)));
+  // Inside HTML a bare name would not resolve, so use the /images path.
+  const names = await Promise.all(matches.map((m) => uploadOnce(m[0], m[1], cache)));
   let index = 0;
-  return value.replace(EMBEDDED_DATA_URI, () => urls[index++]);
+  return value.replace(EMBEDDED_DATA_URI, () => `/images/${names[index++]}`);
 };
 
 /**
  * Deep-walks `value` and returns a copy where every base64 image data URI —
- * whole field values or ones embedded in HTML — is replaced by its Cloudinary
- * URL. Identical images inside one call are uploaded once.
+ * whole field values or ones embedded in HTML — is saved to disk and replaced
+ * by its file name. Identical images inside one call are saved once.
  */
 const replaceInlineImages = async (value, cache = new Map()) => {
   if (typeof value === "string") return replaceInString(value, cache);

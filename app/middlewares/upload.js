@@ -1,15 +1,8 @@
 const multer = require("multer");
 const path = require("path");
 const { randomUUID } = require("crypto");
-const {
-  isCloudinaryEnabled,
-  uploadToCloudinary,
-} = require("../../helpers/cloudinary");
+const { UPLOAD_DIR } = require("../../helpers/fileStorage");
 const ApiError = require("../../error/ApiError");
-
-// Every upload goes to Cloudinary; there is no local disk fallback, so a
-// missing configuration fails the request instead of silently writing files
-// that disappear on the next deploy.
 
 // Allowed MIME types — zip removed (security risk)
 const ALLOWED_MIME_TYPES = new Set([
@@ -34,7 +27,10 @@ const ALLOWED_EXTENSIONS = new Set([
 const generateFileName = (file) =>
   `${randomUUID()}${path.extname(file.originalname).toLowerCase()}`;
 
-const storage = multer.memoryStorage();
+const storage = multer.diskStorage({
+  destination: UPLOAD_DIR,
+  filename: (req, file, cb) => cb(null, generateFileName(file)),
+});
 
 const fileFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
@@ -50,7 +46,7 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-// Profile photos: images only (no PDF), checked before anything reaches Cloudinary.
+// Profile photos: images only (no PDF), checked before anything is written to disk.
 const imageOnlyFilter = (req, file, cb) => {
   const ext = path.extname(file.originalname).toLowerCase();
   if (
@@ -78,22 +74,12 @@ const collectFiles = (req) => {
   return [];
 };
 
-// Uploads the in-memory files to Cloudinary, then sets `filename` and `path`
-// to the secure URL, so controllers that store either keep working unchanged.
-const pushToCloudinary = async (req) => {
-  const files = collectFiles(req);
-  await Promise.all(
-    files.map(async (file) => {
-      const result = await uploadToCloudinary(
-        file.buffer,
-        generateFileName(file),
-      );
-      file.filename = result.secure_url;
-      file.path = result.secure_url;
-      file.cloudinaryPublicId = result.public_id;
-      file.buffer = undefined;
-    }),
-  );
+// Controllers store `filename` or `path`; both become the bare "<uuid>.<ext>"
+// name that /images serves, never the absolute disk path.
+const normalizeFiles = (req) => {
+  collectFiles(req).forEach((file) => {
+    file.path = file.filename;
+  });
 };
 
 const withStorage = (multerMiddleware) => (req, res, next) => {
@@ -105,16 +91,8 @@ const withStorage = (multerMiddleware) => (req, res, next) => {
           : err,
       );
     }
-    if (!collectFiles(req).length) return next();
-    if (!isCloudinaryEnabled) {
-      return next(
-        new ApiError(
-          500,
-          "File storage is not configured (Cloudinary credentials missing)",
-        ),
-      );
-    }
-    pushToCloudinary(req).then(() => next(), next);
+    normalizeFiles(req);
+    next();
   });
 };
 
