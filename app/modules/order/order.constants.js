@@ -1,4 +1,5 @@
 const ORDER_STATUS = {
+  PRE_ORDER: "pre_order",
   PENDING: "pending",
   PACKAGING: "packaging",
   CONFIRMED: "confirmed",

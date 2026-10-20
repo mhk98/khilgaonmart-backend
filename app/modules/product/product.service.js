@@ -77,6 +77,8 @@ const parseVariationRows = (raw, uploadedPaths = []) => {
   const seen = new Set();
   return rows.map((v = {}) => {
     const options = normalizeVariantOptions(v.options);
+    const preOrder = v.preOrder === true || v.preOrder === "true" || v.preOrder === 1 || v.preOrder === "1";
+    const stock = Math.floor(Number(v.stock) || 0);
     const key = variantOptionKey(options);
     if (seen.has(key)) {
       throw new ApiError(400, key ? `Duplicate variant: ${Object.values(options).join(" / ")}` : "Only one variant can have no options");
@@ -93,7 +95,9 @@ const parseVariationRows = (raw, uploadedPaths = []) => {
       purchasePrice: optionalPrice(v.purchasePrice),
       oldPrice:      optionalPrice(v.oldPrice),
       newPrice:      optionalPrice(v.newPrice),
-      stock:         Math.max(0, Math.floor(Number(v.stock) || 0)),
+      // Pre-orders can push stock below zero; keep that owed quantity on save.
+      stock:         preOrder ? stock : Math.max(0, stock),
+      preOrder,
     };
   });
 };
@@ -587,7 +591,8 @@ const toStorefrontProduct = (product, maps = {}) => {
 
   const variants = variations.map((variation) => {
     const colorName = maps.colors?.get(Number(variation.colorId)) || null;
-    const stock = Number(variation.stock || 0);
+    const stock = Math.max(0, Number(variation.stock || 0));
+    const preOrder = Boolean(variation.preOrder);
     return {
       id: variation.Id,
       options: getVariationOptions(variation, colorName),
@@ -597,7 +602,8 @@ const toStorefrontProduct = (product, maps = {}) => {
       newPrice: variationSalePrice(variation),
       stock,
       availability: variation.availability || null,
-      inStock: variation.availability !== "out of stock" && stock > 0,
+      preOrder,
+      inStock: variation.availability !== "out of stock" && (preOrder || stock > 0),
     };
   });
 
@@ -623,6 +629,7 @@ const toStorefrontProduct = (product, maps = {}) => {
     : 0;
   const salePrices = priced.map((variant) => variant.newPrice);
   const stock = variants.reduce((sum, variant) => sum + (variant.inStock ? variant.stock : 0), 0);
+  const preOrder = variants.some((variant) => variant.preOrder && variant.inStock);
 
   return {
     Id: plain.Id,
@@ -650,7 +657,8 @@ const toStorefrontProduct = (product, maps = {}) => {
     sku: plain.sku,
     freeShipping: Boolean(plain.freeShipping),
     bestDeals: Boolean(plain.bestDeals),
-    inStock: stock > 0,
+    inStock: stock > 0 || preOrder,
+    preOrder,
     status: plain.status,
   };
 };

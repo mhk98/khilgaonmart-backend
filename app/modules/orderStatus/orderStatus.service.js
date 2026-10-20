@@ -5,6 +5,7 @@ const ApiError = require("../../../error/ApiError");
 const M = () => db.orderStatus;
 
 const DEFAULT_ORDER_STATUSES = [
+  { key: "pre_order", label: "Pre Order" },
   { key: "pending", label: "Pending" },
   { key: "packaging", label: "Packaging" },
   { key: "confirmed", label: "Confirmed" },

@@ -477,6 +477,11 @@ const ensureVariationStorefrontColumns = async () => {
     allowNull: true,
     defaultValue: "in stock",
   });
+  await maybeAdd("preOrder", {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+  });
 };
 
 const ensureCategoryFrontendColumns = async () => {

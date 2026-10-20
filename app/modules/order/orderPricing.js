@@ -202,6 +202,7 @@ const priceWebsiteOrder = async (payload, strict) => {
       price,
       qty,
       freeShipping,
+      preOrder: Boolean(variation.preOrder),
     };
   });
 

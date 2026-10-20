@@ -62,7 +62,7 @@ if (missingEnvVars.length) {
   process.exit(1);
 }
 
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 4000;
 
 /* ========================
    SECURITY HEADERS
@@ -89,7 +89,7 @@ if (compression) {
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:3001",
-  "http://localhost:5173",
+  "http://localhost:5174",
   "https://holydeen.com",
   "https://admin.holydeen.com",
 ];
@@ -204,7 +204,10 @@ app.use(
     // Uploaded SVGs may contain scripts; sandbox them when opened directly.
     setHeaders: (res, filePath) => {
       if (filePath.toLowerCase().endsWith(".svg")) {
-        res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+        res.setHeader(
+          "Content-Security-Policy",
+          "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        );
       }
     },
   }),

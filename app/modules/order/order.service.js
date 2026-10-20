@@ -186,6 +186,7 @@ const toPublicOrder = (order) => {
     customerAddress: meta.customerAddress || [plain.customerArea, plain.customerDistrict].filter(Boolean).join(", "),
     paymentMethod: meta.paymentMethod || "cod",
     paymentStatus: meta.paymentStatus || "pending",
+    orderTag: meta.orderTag || "",
     items,
     subtotal: meta.subtotal ?? Number(plain.totalBill || 0),
     deliveryCharge: meta.deliveryCharge ?? 0,
@@ -996,6 +997,7 @@ const normalizeCreatePayload = ({ stockLedger, ...payload }) => {
     tracking: payload.tracking || payload.trackingData || null,
     source: orderSource,
     orderSource,
+    orderTag: typeof payload.orderTag === "string" ? payload.orderTag.trim() : "",
   };
 
   return {
@@ -1011,7 +1013,8 @@ const normalizeCreatePayload = ({ stockLedger, ...payload }) => {
     totalBill: Number(payload.total || payload.subtotal || 0),
     advance: Number(payload.advance || 0),
     orderSource,
-    status: "pending",
+    // Orders with a pre-order variant wait in their own queue ahead of Pending.
+    status: items.some((item) => item.preOrder) ? "pre_order" : "pending",
     orderDate: new Date().toISOString().slice(0, 10),
     note: JSON.stringify(meta),
   };
@@ -1058,7 +1061,8 @@ const createOrderInDB = async (payload, options = {}) => {
     if (existing && existing.status !== "incomplete") return { order: existing, created: false };
     if (blockError) throw blockError;
     if (existing) {
-      await existing.update({ ...normalizedPayload, status: "pending" }, { transaction });
+      const status = normalizedPayload.status === "pre_order" ? "pre_order" : "pending";
+      await existing.update({ ...normalizedPayload, status }, { transaction });
       return { order: existing, created: true };
     }
     const orderId = options.orderId || await generateOrderId(transaction);
@@ -1364,7 +1368,7 @@ const trackOrdersByPhoneFromDB = async (phone, invoiceId, options = {}) => {
   const normalizedInvoice = String(invoiceId || "").trim();
   if (!normalized && !normalizedInvoice) throw new ApiError(400, "Phone number or invoice ID is required");
 
-  const activeTrackingStatuses = ["pending", "confirmed", "packaging", "in_courier", "on_hold"];
+  const activeTrackingStatuses = ["pre_order", "pending", "confirmed", "packaging", "in_courier", "on_hold"];
   const baseWhere = normalizedInvoice
     ? { orderId: { [Op.in]: orderIdVariants(normalizedInvoice) } }
     : { customerPhone: { [Op.like]: `%${normalized}%` } };
@@ -1570,6 +1574,18 @@ const updateOrderInDB = async (id, payload) => {
         next.note = JSON.stringify({ ...meta, customerAddress: mergedAddress });
       }
     }
+  }
+  if (Object.prototype.hasOwnProperty.call(next, "orderTag") || next.orderSource !== undefined) {
+    const meta = parseAnyOrderMeta(next.note ?? order.note);
+    if (Object.prototype.hasOwnProperty.call(next, "orderTag")) {
+      meta.orderTag = typeof next.orderTag === "string" ? next.orderTag.trim() : "";
+      delete next.orderTag;
+    }
+    if (next.orderSource !== undefined) {
+      meta.orderSource = next.orderSource;
+      meta.source = next.orderSource;
+    }
+    next.note = JSON.stringify(meta);
   }
   if (Array.isArray(next.items)) {
     // Staff edited the order lines: store them in the order meta (which also drives

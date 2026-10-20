@@ -50,7 +50,8 @@ const variationRegularPrice = (variation = {}) =>
   Number(variation.oldPrice || variation.newPrice || variation.purchasePrice || 0);
 
 const isVariationAvailable = (variation = {}, qty = 1) =>
-  variation.availability !== "out of stock" && Number(variation.stock || 0) >= qty;
+  variation.availability !== "out of stock" &&
+  (Boolean(variation.preOrder) || Number(variation.stock || 0) >= qty);
 
 const variantLabel = (options = {}) =>
   Object.entries(options)

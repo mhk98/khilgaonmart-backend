@@ -19,6 +19,8 @@ module.exports = (sequelize, DataTypes) => {
       unit:          { type: DataTypes.STRING,        allowNull: true },
       sku:           { type: DataTypes.STRING,        allowNull: true },
       availability:  { type: DataTypes.STRING(50),    allowNull: true, defaultValue: "in stock" },
+      // Pre-order variants stay orderable (and are not shown as stock out) with no stock.
+      preOrder:      { type: DataTypes.BOOLEAN,       allowNull: false, defaultValue: false },
       deletedAt:     { type: DataTypes.DATE,          allowNull: true },
     },
     {

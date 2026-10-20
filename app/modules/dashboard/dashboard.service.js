@@ -10,6 +10,7 @@ const daysAgo = (n) => {
 
 const STATUS_CONFIG = [
   { key: "all",        label: "All Order",          color: "#3b82f6" },
+  { key: "pre_order",  label: "Pre Order",          color: "#ec4899" },
   { key: "pending",    label: "Pending Orders",     color: "#8b5cf6" },
   { key: "confirmed",  label: "Confirmed Orders",   color: "#06b6d4" },
   { key: "packaging",  label: "Packaging Orders",   color: "#a855f7" },
@@ -206,7 +207,7 @@ const getDashboardStats = async ({ fromDate, toDate } = {}, user = {}) => {
   // ── 6. Delivery stats ───────────────────────────────────────────────────
   const deliveredRow   = statusMap["delivered"]   || { count: 0, bill: 0 };
   const returnedRow    = statusMap["returned"]    || { count: 0, bill: 0 };
-  const processingStatuses = ["pending", "packaging", "confirmed", "in_courier", "on_hold", "incomplete"];
+  const processingStatuses = ["pre_order", "pending", "packaging", "confirmed", "in_courier", "on_hold", "incomplete"];
   const processingCount = processingStatuses.reduce((s, k) => s + (statusMap[k]?.count || 0), 0);
   const processingBill  = processingStatuses.reduce((s, k) => s + (statusMap[k]?.bill  || 0), 0);
 
