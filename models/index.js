@@ -400,6 +400,7 @@ const ensureProductStatusNoteColumns = async () => {
     type: DataTypes.DECIMAL(12, 2),
     allowNull: true,
   });
+  await maybeAdd("rackNo", { type: DataTypes.STRING(64), allowNull: true });
   await maybeAdd("stockAlert", {
     type: DataTypes.INTEGER(10),
     allowNull: true,
@@ -867,6 +868,22 @@ const ensureIpBlockCompatibilityColumns = async () => {
   });
 };
 
+const ensureOrderStatusShowAfterColumn = async () => {
+  const queryInterface = db.sequelize.getQueryInterface();
+  const tableName = db.orderStatus.getTableName();
+  const tableDefinition = await queryInterface.describeTable(tableName);
+  if (hasColumn(tableDefinition, "showAfter")) return;
+  await queryInterface.addColumn(tableName, "showAfter", {
+    type: DataTypes.STRING(64),
+    allowNull: true,
+  });
+  // One-time placement when the column is created: Courier Pickup / Sales sits after In Courier.
+  await db.sequelize.query(
+    `UPDATE \`${tableName}\` SET showAfter = 'in_courier'
+     WHERE LOWER(REGEXP_REPLACE(name, '[^A-Za-z0-9]+', '_')) = 'courier_pickup_sales'`,
+  );
+};
+
 const ensureOrderStatusColumn = async () => {
   const queryInterface = db.sequelize.getQueryInterface();
   const tableName = db.order.getTableName();
@@ -985,6 +1002,7 @@ db.ready = db.sequelize
     await ensureOrderDeviceIdColumn();
     await ensureOrderSourceColumn();
     await ensureOrderStatusColumn();
+    await ensureOrderStatusShowAfterColumn();
     await ensureOrderFraudGuardColumns();
     await ensureOrderAssignmentColumns();
     await ensureLandingPageContentColumns();

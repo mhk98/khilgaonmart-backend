@@ -1,7 +1,7 @@
 const db = require("../../../models");
 
 // Orders in these statuses do not hold variant stock.
-const STOCK_RELEASE_STATUSES = new Set(["incomplete", "cancelled", "returned"]);
+const STOCK_RELEASE_STATUSES = new Set(["incomplete", "cancelled", "returned", "return_received"]);
 
 const parseJson = (value, fallback) => {
   if (value && typeof value === "object") return value;

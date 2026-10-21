@@ -92,7 +92,9 @@ const getDashboardStats = async ({ fromDate, toDate } = {}, user = {}) => {
   statusRows.forEach((r) => {
     const count    = Number(r.count)    || 0;
     const bill     = Number(r.totalBill) || 0;
-    statusMap[r.status] = { count, bill };
+    // Return Received is shown together with Returned.
+    const key = r.status === "return_received" ? "returned" : r.status;
+    statusMap[key] = { count: (statusMap[key]?.count || 0) + count, bill: (statusMap[key]?.bill || 0) + bill };
     grandCount += count;
     grandBill  += bill;
   });

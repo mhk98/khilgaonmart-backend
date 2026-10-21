@@ -2,6 +2,7 @@ const express = require("express");
 const { ENUM_USER_ROLE } = require("../../enums/user");
 const auth = require("../../middlewares/auth");
 const OrderController = require("./order.controller");
+const { uploadFile } = require("../../middlewares/upload");
 
 const router = express.Router();
 
@@ -16,6 +17,28 @@ router.post("/:id/reconfirm/verify", OrderController.verifyReconfirmOtp);
 // Admin panel — require authentication
 router.post("/admin", auth(), OrderController.createStaffOrder);
 router.get("/status-counts", auth(), OrderController.getOrderStatusCounts);
+router.get("/filter-options", auth(), OrderController.getOrderFilterOptions);
+router.get("/report/:type", auth(), OrderController.getOrderReport);
+router.get("/sales-summary", auth(), OrderController.getSalesSummary);
+router.get("/packing-list", auth(), OrderController.getPackingList);
+router.post(
+  "/bulk-action",
+  auth(
+    ENUM_USER_ROLE.SUPER_ADMIN,
+    ENUM_USER_ROLE.ADMIN,
+    ENUM_USER_ROLE.CS,
+    ENUM_USER_ROLE.LOGISTICS,
+  ),
+  OrderController.bulkOrderAction,
+);
+router.post(
+  "/send-sms",
+  auth(ENUM_USER_ROLE.SUPER_ADMIN, ENUM_USER_ROLE.ADMIN, ENUM_USER_ROLE.CS),
+  OrderController.sendSmsToOrders,
+);
+router.post("/mark-printed", auth(), OrderController.markOrdersPrinted);
+router.get("/courier/pathao/cities", auth(), OrderController.getPathaoCities);
+router.get("/courier/pathao/cities/:cityId/zones", auth(), OrderController.getPathaoZones);
 router.get("/courier/steadfast/balance", auth(), OrderController.getSteadfastBalance);
 router.get("/courier/steadfast/returns", auth(), OrderController.getSteadfastReturnRequests);
 router.get("/courier/steadfast/payments", auth(), OrderController.getSteadfastPayments);
@@ -86,6 +109,7 @@ router.post(
   OrderController.createSteadfastReturnRequest,
 );
 router.get("/:id", auth(), OrderController.getOrderById);
+router.post("/:id/attachments", auth(), uploadFile, OrderController.addOrderAttachment);
 router.put(
   "/:id/status",
   auth(

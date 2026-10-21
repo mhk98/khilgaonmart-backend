@@ -32,6 +32,41 @@ const normalizeRow = (row) => {
   return { ...plain, key, label };
 };
 
+// Moves statuses with showAfter right behind that status (several after the same one keep
+// their creation order). Unknown targets and cycles fall back to the end of the list.
+const applyShowAfter = (list) => {
+  const keys = new Set(list.map((row) => row.key));
+  const placed = (row) => !row.showAfter || row.showAfter === row.key || !keys.has(row.showAfter);
+  const result = list.filter(placed);
+  let pending = list.filter((row) => !placed(row));
+  while (pending.length) {
+    const waiting = [];
+    pending.forEach((row) => {
+      const index = result.findIndex((item) => item.key === row.showAfter);
+      if (index < 0) {
+        waiting.push(row);
+        return;
+      }
+      let position = index + 1;
+      while (position < result.length && result[position].showAfter === row.showAfter) position += 1;
+      result.splice(position, 0, row);
+    });
+    if (waiting.length === pending.length) {
+      result.push(...waiting);
+      break;
+    }
+    pending = waiting;
+  }
+  return result;
+};
+
+const cleanPayload = (payload = {}) => ({
+  ...payload,
+  ...(Object.prototype.hasOwnProperty.call(payload, "showAfter")
+    ? { showAfter: toOrderStatusKey(payload.showAfter) || null }
+    : {}),
+});
+
 const getActiveStatusOptions = async () => {
   const rows = await M().findAll({
     where: { status: { [Op.ne]: "Inactive" } },
@@ -45,17 +80,17 @@ const getActiveStatusOptions = async () => {
   ];
 
   const seen = new Set();
-  return normalized.filter((row) => {
+  return applyShowAfter(normalized.filter((row) => {
     if (seen.has(row.key)) return false;
     seen.add(row.key);
     return true;
-  });
+  }));
 };
 
 const getActiveStatusKeys = async () =>
   (await getActiveStatusOptions()).map((status) => status.key);
 
-const insertIntoDB = async (data) => M().create(data);
+const insertIntoDB = async (data) => M().create(cleanPayload(data));
 
 const getAllFromDB = async (filters, options) => {
   const { page, limit, skip } = paginationHelpers.calculatePagination(options);
@@ -76,7 +111,7 @@ const getPublicFromDB = async () => {
 const updateOneFromDB = async (id, payload) => {
   const row = await M().findOne({ where: { Id: id } });
   if (!row) throw new ApiError(404, "Order status not found");
-  await row.update(payload);
+  await row.update(cleanPayload(payload));
   return row;
 };
 
@@ -89,6 +124,7 @@ const deleteIdFromDB = async (id) => {
 
 module.exports = {
   DEFAULT_ORDER_STATUSES,
+  applyShowAfter,
   toOrderStatusKey,
   getActiveStatusOptions,
   getActiveStatusKeys,

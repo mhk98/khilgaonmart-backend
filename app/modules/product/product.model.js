@@ -13,6 +13,7 @@ module.exports = (sequelize, DataTypes) => {
       productVideo:    { type: DataTypes.STRING(500),   allowNull: true },
       advanceAmount:   { type: DataTypes.DECIMAL(12,2), allowNull: true },
       stockAlert:      { type: DataTypes.INTEGER(10),   allowNull: true },
+      rackNo:          { type: DataTypes.STRING(64),    allowNull: true },
       description:     { type: DataTypes.TEXT,          allowNull: true },
       shortDescription:{ type: DataTypes.TEXT,          allowNull: true },
       metaTitle:       { type: DataTypes.STRING(500),   allowNull: true },

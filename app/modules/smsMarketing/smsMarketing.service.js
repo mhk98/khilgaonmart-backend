@@ -7,7 +7,7 @@ const ApiError = require("../../../error/ApiError");
 const buildOrderWhere = (filter) => {
   if (!filter || filter === "All") return {};
   const ACTIVE_STATUSES   = ["pre_order", "pending", "confirmed", "packaging", "on_hold", "in_courier", "delivered"];
-  const INACTIVE_STATUSES = ["cancelled", "returned", "incomplete"];
+  const INACTIVE_STATUSES = ["cancelled", "returned", "return_received", "incomplete"];
   if (filter === "Active Customers")   return { status: { [Op.in]: ACTIVE_STATUSES   } };
   if (filter === "Inactive Customers") return { status: { [Op.in]: INACTIVE_STATUSES } };
   return {};
@@ -188,12 +188,7 @@ const sendViaTwilio = async (settings, recipients, smsText) => {
   return results;
 };
 
-const sendSmsMarketing = async ({ customers = "All", smsText }) => {
-  if (!smsText?.trim()) throw new ApiError(400, "SMS text is required");
-
-  const recipients = await getRecipients(customers);
-  if (recipients.length === 0) throw new ApiError(400, "No recipients found for selected filter");
-
+const dispatchSms = async (recipients, smsText) => {
   const settings = await getSmsGatewaySettings();
   const gatewayType = settings?.type || "";
 
@@ -215,7 +210,16 @@ const sendSmsMarketing = async ({ customers = "All", smsText }) => {
   } else {
     throw new ApiError(503, `Unsupported SMS gateway type: "${gatewayType}". Supported: ssl_wireless, bdbulksms, twilio`);
   }
+  return { gatewayType, result };
+};
 
+const sendSmsMarketing = async ({ customers = "All", smsText }) => {
+  if (!smsText?.trim()) throw new ApiError(400, "SMS text is required");
+
+  const recipients = await getRecipients(customers);
+  if (recipients.length === 0) throw new ApiError(400, "No recipients found for selected filter");
+
+  const { gatewayType, result } = await dispatchSms(recipients, smsText);
   return {
     recipientCount: recipients.length,
     filter:         customers,
@@ -256,4 +260,19 @@ const sendTransactionalSms = async (phone, smsText) => {
   throw new ApiError(503, `Unsupported SMS gateway type: "${gatewayType}". Supported: ssl_wireless, bdbulksms, twilio`);
 };
 
-module.exports = { sendSmsMarketing, sendTransactionalSms };
+// recipients: [{ phone, name }]
+const sendSmsToRecipients = async (recipients, smsText) => {
+  if (!smsText?.trim()) throw new ApiError(400, "SMS text is required");
+  if (!recipients.length) throw new ApiError(400, "No recipients found");
+  const { gatewayType, result } = await dispatchSms(recipients, smsText);
+  return {
+    recipientCount: recipients.length,
+    gatewayType,
+    sent:    result.sent,
+    failed:  result.failed,
+    errors:  result.errors,
+    message: `SMS sent to ${result.sent} of ${recipients.length} recipient(s).`,
+  };
+};
+
+module.exports = { sendSmsMarketing, sendTransactionalSms, sendSmsToRecipients };

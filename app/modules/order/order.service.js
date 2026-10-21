@@ -3,7 +3,7 @@ const { Op, fn, col, literal } = require("sequelize");
 const db = require("../../../models");
 const ApiError = require("../../../error/ApiError");
 const paginationHelpers = require("../../../helpers/paginationHelper");
-const { ORDER_STATUS_VALUES, ORDER_SEARCHABLE_FIELDS } = require("./order.constants");
+const { ORDER_STATUS, ORDER_STATUS_VALUES, ORDER_SEARCHABLE_FIELDS, RETURN_STATUSES } = require("./order.constants");
 const SiteSettingService = require("../siteSetting/siteSetting.service");
 const OrderStatusService = require("../orderStatus/orderStatus.service");
 const CouponCodeService = require("../couponCode/couponCode.service");
@@ -11,12 +11,16 @@ const NotificationService = require("../notification/notification.service");
 const SmsMarketingService = require("../smsMarketing/smsMarketing.service");
 const { priceOrderItems, resolveStaffItems, calculateStaffTotals } = require("./orderPricing");
 const { registerOrderStockHooks } = require("./orderStock");
+const { appendStatusHistory, registerOrderStatusHistoryHook } = require("./orderStatusHistory");
+const { buildOrderListFilterConditions, hasProductFilter, metaText } = require("./orderFilters");
+const { ORDER_REPORT_TYPES, buildOrderReport, buildSalesSummary, buildPackingList } = require("./orderReports");
 
 const Order = db.order;
 registerOrderStockHooks(Order);
+registerOrderStatusHistoryHook(Order);
 const IpBlock = db.ipBlock;
 const User = db.user;
-const FAILED_DELIVERY_STATUSES = ["cancelled", "returned", "on_hold"];
+const FAILED_DELIVERY_STATUSES = ["cancelled", ...RETURN_STATUSES, "on_hold"];
 const MANUAL_FRAUD_STATUSES = ["safe", "fake"];
 const ORDER_ASSIGNMENT_USER_ATTRIBUTES = [
   "Id",
@@ -151,6 +155,18 @@ const parseAnyOrderMeta = (note) => {
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
+  }
+};
+
+// Like parseAnyOrderMeta, but an old plain-text note is kept as legacyNote instead of dropped.
+const parseMetaKeepingLegacyNote = (note) => {
+  const meta = parseAnyOrderMeta(note);
+  if (Object.keys(meta).length || typeof note !== "string" || !note.trim()) return meta;
+  try {
+    JSON.parse(note);
+    return meta;
+  } catch {
+    return { legacyNote: note };
   }
 };
 
@@ -736,6 +752,10 @@ const getOrderAdminNoteText = (order) => {
   return "";
 };
 
+// The order page's Courier Note goes to the courier; otherwise the admin notes do.
+const getCourierNoteText = (order) =>
+  String(getOrderMeta(order).courierNote || "").trim() || getOrderAdminNoteText(order);
+
 const getOrderDueAmount = (order) => {
   const meta = getOrderMeta(order);
   const total = Number(order.totalBill || meta.total || 0);
@@ -761,7 +781,7 @@ const buildSteadfastOrderPayload = (order, options = {}) => {
     recipient_email: options.recipientEmail || undefined,
     recipient_address: recipientAddress.slice(0, 250),
     cod_amount: Number(options.codAmount ?? getOrderDueAmount(order)),
-    note: String(options.note || getOrderAdminNoteText(order) || "").slice(0, 250) || undefined,
+    note: String(options.note || getCourierNoteText(order) || "").slice(0, 250) || undefined,
     item_description: String(order.productName || "").slice(0, 250) || undefined,
     total_lot: Number(options.totalLot || order.quantity || 1),
     delivery_type: Number(options.deliveryType ?? 0),
@@ -778,6 +798,8 @@ const buildPathaoOrderPayload = (order, config, options = {}) => {
   if (recipientAddress.length < 10) {
     throw new ApiError(400, "Recipient address must be at least 10 characters for Pathao");
   }
+  // City/zone picked on the order page ("Pathao Location") wins over the store default.
+  const pathaoLocation = getOrderMeta(order).pathaoLocation || {};
 
   return {
     store_id: Number(options.storeId || config.storeId),
@@ -786,12 +808,12 @@ const buildPathaoOrderPayload = (order, config, options = {}) => {
     recipient_phone: phone,
     recipient_secondary_phone: options.alternativePhone ? normalizeCourierPhone(options.alternativePhone) : undefined,
     recipient_address: recipientAddress.slice(0, 220),
-    recipient_city: options.recipientCity || config.recipientCity,
-    recipient_zone: options.recipientZone || config.recipientZone,
-    recipient_area: options.recipientArea || config.recipientArea,
+    recipient_city: options.recipientCity || pathaoLocation.cityId || config.recipientCity,
+    recipient_zone: options.recipientZone || pathaoLocation.zoneId || config.recipientZone,
+    recipient_area: options.recipientArea || pathaoLocation.areaId || config.recipientArea,
     delivery_type: Number(options.deliveryType || config.deliveryType || 48),
     item_type: Number(options.itemType || config.itemType || 2),
-    special_instruction: String(options.note || getOrderAdminNoteText(order) || "").slice(0, 250) || undefined,
+    special_instruction: String(options.note || getCourierNoteText(order) || "").slice(0, 250) || undefined,
     item_quantity: Number(options.itemQuantity || order.quantity || 1),
     item_weight: Number(options.itemWeight || config.itemWeight || 0.5),
     item_description: String(order.productName || "Parcel").slice(0, 250),
@@ -1173,7 +1195,8 @@ const saveIncompleteOrderInDB = async (payload = {}) => {
 const validateOrderStatus = async (status) => {
   const key = OrderStatusService.toOrderStatusKey(status);
   const activeKeys = await OrderStatusService.getActiveStatusKeys();
-  const validKeys = activeKeys.length ? activeKeys : ORDER_STATUS_VALUES;
+  // Return Received is built in, so it is valid even though it is not in the status settings.
+  const validKeys = [...(activeKeys.length ? activeKeys : ORDER_STATUS_VALUES), ORDER_STATUS.RETURN_RECEIVED];
   if (!validKeys.includes(key)) {
     throw new ApiError(400, `Invalid status. Valid: ${validKeys.join(", ")}`);
   }
@@ -1251,22 +1274,67 @@ const getFraudGuardForOrder = async (plainOrder = {}) => {
   };
 };
 
-const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => {
-  const { page, limit, skip, sortBy, sortOrder } =
-    paginationHelpers.calculatePagination(paginationOptions);
+const phoneHistoryKey = (phone) => normalizePhone(phone).slice(-10);
+const FAILED_PARCEL_STATUSES = [...RETURN_STATUSES, "cancelled", "incomplete"];
 
-  const { status, search, fromDate, toDate, assignedEmployeeId } = filters;
+// All orders of the given customers in one query, keyed by the last 10 phone digits.
+const getCustomerOrderHistoryByPhone = async (phones = []) => {
+  const keys = [...new Set(phones.map(phoneHistoryKey).filter((key) => key.length >= 6))];
+  const byPhone = new Map();
+  if (!keys.length) return byPhone;
+  const phoneExpr = "RIGHT(REGEXP_REPLACE(`Order`.`customerPhone`, '[^0-9]', ''), 10)";
+  const rows = await Order.findAll({
+    attributes: ["Id", "customerPhone", "courier", "status"],
+    where: db.sequelize.where(literal(phoneExpr), { [Op.in]: keys }),
+    raw: true,
+    paranoid: true,
+  });
+  rows.forEach((row) => {
+    const key = phoneHistoryKey(row.customerPhone);
+    if (!byPhone.has(key)) byPhone.set(key, []);
+    byPhone.get(key).push(row);
+  });
+  return byPhone;
+};
+
+// Same counting as the fraud check: a parcel is an order handed to a courier.
+const summarizeCustomerHistory = (history = []) => {
+  const statusOf = (row) => OrderStatusService.toOrderStatusKey(row.status);
+  const parcels = history.filter((row) => String(row.courier || "").trim());
+  const delivered = parcels.filter((row) => statusOf(row) === "delivered").length;
+  const failed = parcels.filter((row) => FAILED_PARCEL_STATUSES.includes(statusOf(row))).length;
+  return {
+    parcels: parcels.length,
+    delivered,
+    failed,
+    successRate: parcels.length ? Math.round((delivered / parcels.length) * 100) : null,
+    orders: history.length,
+    completed: history.filter((row) => statusOf(row) === "delivered").length,
+  };
+};
+
+// Where clause for the admin order list; shared with the filter reports.
+const buildOrderListWhere = (filters = {}, currentUser = {}) => {
+  const { status, search, fromDate, toDate, assignedEmployeeId, employeeAction } = filters;
 
   const where = {};
 
-  if (status && status !== "all") {
-    where.status = OrderStatusService.toOrderStatusKey(status);
+  const statusKey = status && status !== "all" ? OrderStatusService.toOrderStatusKey(status) : "";
+  if (statusKey === ORDER_STATUS.RETURNED) {
+    // The Returned tab also lists orders marked Return Received.
+    where.status = { [Op.in]: RETURN_STATUSES };
+  } else if (statusKey) {
+    where.status = statusKey;
+  } else if (hasProductFilter(filters) && !isFilterOn(filters.includeReturns)) {
+    where.status = { [Op.notIn]: RETURN_STATUSES };
   }
 
+  // "Assigned By" filters on who assigned the order instead of who it is assigned to.
+  const employeeField = employeeAction === "assigned_by" ? "assignedById" : "assignedEmployeeId";
   if (assignedEmployeeId === "unassigned" || assignedEmployeeId === "not_assigned") {
-    where.assignedEmployeeId = { [Op.is]: null };
+    where[employeeField] = { [Op.is]: null };
   } else if (assignedEmployeeId && assignedEmployeeId !== "all") {
-    where.assignedEmployeeId = Number(assignedEmployeeId);
+    where[employeeField] = Number(assignedEmployeeId);
   }
 
   if (search) {
@@ -1287,7 +1355,16 @@ const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => 
     where.orderDate = { [Op.lte]: toDate };
   }
 
-  const scopedWhere = applyOrderAssignmentScope(where, currentUser);
+  const advancedConditions = buildOrderListFilterConditions(filters);
+  if (advancedConditions.length) where[Op.and] = advancedConditions;
+
+  return applyOrderAssignmentScope(where, currentUser);
+};
+
+const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => {
+  const { page, limit, skip, sortBy, sortOrder } =
+    paginationHelpers.calculatePagination(paginationOptions);
+  const scopedWhere = buildOrderListWhere(filters, currentUser);
 
   const { count, rows } = await Order.findAndCountAll({
     where: scopedWhere,
@@ -1298,23 +1375,18 @@ const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => 
     order: [[sortBy || "Id", sortOrder || "DESC"]],
   });
 
+  const plainRows = rows.map((row) => (typeof row.toJSON === "function" ? row.toJSON() : row));
+  const historyByPhone = await getCustomerOrderHistoryByPhone(plainRows.map((row) => row.customerPhone));
+
   const rowsWithRepeatInfo = await Promise.all(
-    rows.map(async (row) => {
-      const plain = typeof row.toJSON === "function" ? row.toJSON() : row;
-      const phone = normalizePhone(plain.customerPhone);
-      const previousOrderCount = phone
-        ? await Order.count({
-            where: {
-              Id: { [Op.lt]: plain.Id },
-              customerPhone: { [Op.like]: `%${phone.slice(-11) || phone}%` },
-            },
-            paranoid: true,
-          })
-        : 0;
+    plainRows.map(async (plain) => {
+      const history = historyByPhone.get(phoneHistoryKey(plain.customerPhone)) || [];
+      const previousOrderCount = history.filter((item) => item.Id < plain.Id).length;
       return {
         ...withAssignmentUsers(plain),
         isRepeat: previousOrderCount > 0,
         previousOrderCount,
+        courierSummary: summarizeCustomerHistory(history),
         fraudGuard: await getFraudGuardForOrder(plain),
       };
     }),
@@ -1325,6 +1397,260 @@ const getOrdersFromDB = async (filters, paginationOptions, currentUser = {}) => 
     data: rowsWithRepeatInfo,
   };
 };
+
+const isFilterOn = (value) => value === true || value === "true" || value === "1";
+
+const distinctValues = async (expression) => {
+  const rows = await Order.findAll({
+    attributes: [[literal(expression), "value"]],
+    group: [literal(expression)],
+    raw: true,
+  });
+  return rows
+    .map((row) => String(row.value ?? "").trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+};
+
+// Option lists for the admin order filter panel, taken from the values orders actually have.
+const getOrderFilterOptionsFromDB = async () => {
+  const [districts, orderSources, orderTags, courierStatuses, paymentStatuses, roles] = await Promise.all([
+    distinctValues("TRIM(`Order`.`customerDistrict`)"),
+    distinctValues(`COALESCE(NULLIF(\`Order\`.\`orderSource\`, ''), ${metaText("$.orderSource")})`),
+    distinctValues(`LOWER(${metaText("$.orderTag")})`),
+    distinctValues(`LOWER(COALESCE(${metaText("$.courierIntegration.steadfast.status")}, ${metaText("$.courierIntegration.pathao.status")}))`),
+    distinctValues(`LOWER(COALESCE(${metaText("$.paymentStatus")}, 'pending'))`),
+    User.findAll({ attributes: ["role"], group: ["role"], raw: true }).then((rows) =>
+      [...new Set(rows.map((row) => normalizeRole(row.role)).filter(Boolean))].sort(),
+    ),
+  ]);
+  return { districts, orderSources, orderTags, courierStatuses, paymentStatuses, roles };
+};
+
+const markOrdersPrintedInDB = async (orderIds = []) => {
+  const ids = [...new Set((Array.isArray(orderIds) ? orderIds : []).map(Number).filter(Boolean))];
+  if (!ids.length) throw new ApiError(400, "Order ids are required");
+  const orders = await Order.findAll({ where: { Id: { [Op.in]: ids } } });
+  const printedAt = new Date().toISOString();
+  await Promise.all(orders.map((order) => {
+    const meta = getOrderMeta(order);
+    return order.update({
+      note: JSON.stringify({
+        ...(!Object.keys(meta).length && order.note ? { legacyNote: order.note } : {}),
+        ...meta,
+        printedAt,
+        printCount: Number(meta.printCount || 0) + 1,
+      }),
+    });
+  }));
+  return { updated: orders.length, printedAt };
+};
+
+const ORDER_REPORT_ROW_LIMIT = 50000;
+
+const getOrderReportFromDB = async (type, filters, currentUser = {}) => {
+  if (!ORDER_REPORT_TYPES.includes(type)) throw new ApiError(400, "Unknown order report");
+  const rows = await Order.findAll({
+    where: buildOrderListWhere(filters, currentUser),
+    attributes: [
+      "Id", "orderId", "customerName", "customerPhone", "customerArea", "customerDistrict",
+      "productName", "quantity", "totalBill", "advance", "courier", "orderSource", "status",
+      "note", "assignedEmployeeName", "createdAt", "updatedAt",
+    ],
+    order: [["Id", "DESC"]],
+    limit: ORDER_REPORT_ROW_LIMIT,
+    raw: true,
+  });
+  return buildOrderReport(type, rows);
+};
+
+const getSalesSummaryFromDB = async (filters, currentUser = {}) => {
+  const rows = await Order.findAll({
+    where: buildOrderListWhere(filters, currentUser),
+    attributes: ["Id", "productName", "quantity", "totalBill", "advance", "status", "note"],
+    limit: ORDER_REPORT_ROW_LIMIT,
+    raw: true,
+  });
+
+  // Purchase cost comes from each variant's purchase price, or the product's first priced variant.
+  const metas = rows.map((row) => parseAnyOrderMeta(row.note));
+  const productIds = new Set();
+  metas.forEach((meta) => (Array.isArray(meta.items) ? meta.items : []).forEach((item) => {
+    const productId = Number(item.id ?? item.productId);
+    if (productId) productIds.add(productId);
+  }));
+  const variations = productIds.size
+    ? await db.variation.findAll({
+        where: { productId: { [Op.in]: [...productIds] } },
+        attributes: ["Id", "productId", "purchasePrice"],
+        paranoid: false,
+        raw: true,
+      })
+    : [];
+  const variationCosts = new Map();
+  const productCosts = new Map();
+  variations.forEach((variation) => {
+    const cost = Number(variation.purchasePrice);
+    if (!(cost > 0)) return;
+    variationCosts.set(Number(variation.Id), cost);
+    if (!productCosts.has(Number(variation.productId))) productCosts.set(Number(variation.productId), cost);
+  });
+
+  const expenseWhere = { status: "Active" };
+  if (filters.fromDate && filters.toDate) expenseWhere.date = { [Op.between]: [filters.fromDate, filters.toDate] };
+  else if (filters.fromDate) expenseWhere.date = { [Op.gte]: filters.fromDate };
+  else if (filters.toDate) expenseWhere.date = { [Op.lte]: filters.toDate };
+  const expenses = await db.expense.findAll({
+    where: expenseWhere,
+    attributes: ["categoryName", "amount"],
+    raw: true,
+  });
+
+  return buildSalesSummary(rows, {
+    variationCosts,
+    productCosts,
+    expenses,
+    includeReturns: isFilterOn(filters.salesIncludeReturns),
+  });
+};
+
+const getPackingListFromDB = async (filters = {}, options = {}, currentUser = {}) => {
+  const includeReturns = isFilterOn(options.includeReturns);
+  const rows = await Order.findAll({
+    // Returned orders are fetched here and dropped by the builder unless Include Returns is set.
+    where: buildOrderListWhere({ ...filters, includeReturns: "1" }, currentUser),
+    attributes: ["Id", "productName", "productImage", "quantity", "totalBill", "status", "note"],
+    limit: ORDER_REPORT_ROW_LIMIT,
+    raw: true,
+  });
+
+  const productIds = new Set();
+  rows.forEach((row) => {
+    const meta = parseAnyOrderMeta(row.note);
+    [...(Array.isArray(meta.items) ? meta.items : []), ...(Array.isArray(meta.originalItems) ? meta.originalItems : [])]
+      .forEach((item) => {
+        const productId = Number(item.id ?? item.productId);
+        if (productId) productIds.add(productId);
+      });
+  });
+  const productRows = productIds.size
+    ? await db.product.findAll({
+        where: { Id: { [Op.in]: [...productIds] } },
+        attributes: ["Id", "name", "images", "rackNo"],
+        include: [{ model: db.variation, as: "variations", attributes: ["Id", "stock", "purchasePrice", "colorImage"], required: false }],
+        paranoid: false,
+      })
+    : [];
+  const products = new Map(productRows.map((product) => [Number(product.Id), product.get({ plain: true })]));
+
+  // With a product/category filter, only those products are listed unless "Include Other Products".
+  const filteredIds = String(filters.product || "").split(",").map(Number).filter(Boolean);
+  const categoryIds = String(filters.category || "").split(",").map(Number).filter(Boolean);
+  let matchProductIds = null;
+  if ((filteredIds.length && !isFilterOn(filters.productExclude)) || (categoryIds.length && !isFilterOn(filters.categoryExclude))) {
+    matchProductIds = new Set(isFilterOn(filters.productExclude) ? [] : filteredIds);
+    if (categoryIds.length && !isFilterOn(filters.categoryExclude)) {
+      const inCategory = await db.product.findAll({ where: { categoryId: { [Op.in]: categoryIds } }, attributes: ["Id"], raw: true });
+      inCategory.forEach((product) => matchProductIds.add(Number(product.Id)));
+    }
+  }
+
+  return buildPackingList(rows, {
+    products,
+    options: {
+      groupBy: options.groupBy === "product" ? "product" : "variation",
+      includeReturns,
+      includeOtherProducts: isFilterOn(options.includeOtherProducts),
+      matchProductIds,
+      upsales: ["exclude", "only"].includes(options.upsales) ? options.upsales : "",
+      createTimeOnly: isFilterOn(options.createTimeOnly),
+    },
+  });
+};
+
+const BULK_ORDER_ACTIONS = ["status", "order_tag", "customer_tag", "delete_notes", "courier_unlink"];
+const BULK_ORDER_LIMIT = 500;
+
+const toBulkOrderIds = (orderIds) => {
+  const ids = [...new Set((Array.isArray(orderIds) ? orderIds : []).map(Number).filter(Boolean))];
+  if (!ids.length) throw new ApiError(400, "Order ids are required");
+  if (ids.length > BULK_ORDER_LIMIT) throw new ApiError(400, `At most ${BULK_ORDER_LIMIT} orders at a time`);
+  return ids;
+};
+
+// Applies one action to many orders; each order is updated on its own so a failure is
+// reported per order instead of stopping the batch.
+const bulkOrderActionInDB = async ({ orderIds, action, value } = {}, actor = {}) => {
+  if (!BULK_ORDER_ACTIONS.includes(action)) throw new ApiError(400, "Invalid bulk action");
+  const ids = toBulkOrderIds(orderIds);
+  const updated = [];
+  const failed = [];
+
+  if (action === "customer_tag") {
+    // Customer tag is per customer: updateOrderInDB applies it to every order of the phone.
+    const fraudStatus = value === "none" ? "" : value;
+    for (const id of ids) {
+      try {
+        await updateOrderInDB(id, { fraudStatus });
+        updated.push(id);
+      } catch (error) {
+        failed.push({ id, message: error.message });
+      }
+    }
+    return { updated: updated.length, failed };
+  }
+
+  for (const id of ids) {
+    try {
+      if (action === "status") {
+        await updateOrderStatusInDB(id, value, actor.Id);
+      } else if (action === "order_tag") {
+        await updateOrderInDB(id, { orderTag: value === "none" ? "" : String(value || "") });
+      } else {
+        const order = await Order.findByPk(id);
+        if (!order) throw new ApiError(404, "Order not found");
+        const meta = parseMetaKeepingLegacyNote(order.note);
+        if (action === "delete_notes") {
+          delete meta.adminNotes;
+          delete meta.legacyNote;
+          await order.update({ note: JSON.stringify(meta) });
+        } else {
+          // Only forgets the courier link here; the parcel itself is not cancelled at the courier.
+          delete meta.courierIntegration;
+          await order.update({ courier: null, note: JSON.stringify(meta) });
+        }
+      }
+      updated.push(id);
+    } catch (error) {
+      failed.push({ id, message: error.message });
+    }
+  }
+  return { updated: updated.length, failed };
+};
+
+const sendSmsToOrdersInDB = async ({ orderIds, smsText } = {}) => {
+  const ids = toBulkOrderIds(orderIds);
+  const orders = await Order.findAll({
+    where: { Id: { [Op.in]: ids } },
+    attributes: ["customerName", "customerPhone"],
+    raw: true,
+  });
+  const seen = new Set();
+  const recipients = orders
+    .map((order) => ({ phone: String(order.customerPhone || "").trim(), name: order.customerName }))
+    .filter((recipient) => {
+      const key = normalizePhone(recipient.phone).slice(-10);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  return SmsMarketingService.sendSmsToRecipients(recipients, smsText);
+};
+
+const getPathaoCitiesFromProvider = () => pathaoRequest("/aladdin/api/v1/city-list");
+
+const getPathaoZonesFromProvider = (cityId) =>
+  pathaoRequest(`/aladdin/api/v1/cities/${encodeURIComponent(cityId)}/zone-list`);
 
 const getOrderStatusCountsFromDB = async (currentUser = {}) => {
   const activeStatuses = await OrderStatusService.getActiveStatusOptions();
@@ -1344,6 +1670,8 @@ const getOrderStatusCountsFromDB = async (currentUser = {}) => {
     const key = OrderStatusService.toOrderStatusKey(status);
     result[key] = (result[key] || 0) + Number(count);
   });
+  // Return Received orders are listed in the Returned tab, so count them there too.
+  result[ORDER_STATUS.RETURNED] = (result[ORDER_STATUS.RETURNED] || 0) + (result[ORDER_STATUS.RETURN_RECEIVED] || 0);
 
   return result;
 };
@@ -1360,7 +1688,13 @@ const getOrderByIdFromDB = async (id, currentUser = {}) => {
   ) {
     throw new ApiError(403, "You can only view orders assigned to you");
   }
-  return { ...withAssignmentUsers(plain), fraudGuard: await getFraudGuardForOrder(plain) };
+  const history = (await getCustomerOrderHistoryByPhone([plain.customerPhone])).get(phoneHistoryKey(plain.customerPhone)) || [];
+  return {
+    ...withAssignmentUsers(plain),
+    isRepeat: history.some((item) => item.Id < plain.Id),
+    courierSummary: summarizeCustomerHistory(history),
+    fraudGuard: await getFraudGuardForOrder(plain),
+  };
 };
 
 const trackOrdersByPhoneFromDB = async (phone, invoiceId, options = {}) => {
@@ -1530,10 +1864,49 @@ const verifyOrderReconfirmOtpInDB = async (id, payload = {}) => {
   return toPublicOrder({ ...order.get({ plain: true }), status: "confirmed", note: JSON.stringify(meta) });
 };
 
+const ORDER_META_UPDATE_KEYS = [
+  "alternativePhone",
+  "customerEmail",
+  "courierNote",
+  "packingNote",
+  "adminNotes",
+  "customerNotes",
+  "payments",
+  "advance",
+  "attachments",
+  "pathaoLocation",
+  "paymentMethod",
+  "customerAddress",
+];
+
+const addOrderAttachmentInDB = async (id, file, actor = {}) => {
+  if (!file) throw new ApiError(400, "File is required");
+  const order = await Order.findByPk(id);
+  if (!order) throw new ApiError(404, "Order not found");
+  const meta = parseMetaKeepingLegacyNote(order.note);
+  const attachment = {
+    file: file.filename || file.path,
+    name: file.originalname || file.filename,
+    by: getUserDisplayName(actor),
+    at: new Date().toISOString(),
+  };
+  meta.attachments = [...(Array.isArray(meta.attachments) ? meta.attachments : []), attachment];
+  await order.update({ note: JSON.stringify(meta) });
+  return attachment;
+};
+
 const updateOrderInDB = async (id, payload) => {
   const order = await Order.findByPk(id);
   if (!order) throw new ApiError(404, "Order not found");
-  const { stockLedger, ...next } = payload;
+  const { stockLedger, metaUpdates, ...next } = payload;
+  // Order-page fields that live in the note; merged into the stored note so other data stays.
+  if (metaUpdates && typeof metaUpdates === "object") {
+    const meta = parseMetaKeepingLegacyNote(next.note ?? order.note);
+    ORDER_META_UPDATE_KEYS.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(metaUpdates, key)) meta[key] = metaUpdates[key];
+    });
+    next.note = JSON.stringify(meta);
+  }
   if (next.source && !next.orderSource) {
     next.orderSource = next.source;
   }
@@ -1576,7 +1949,7 @@ const updateOrderInDB = async (id, payload) => {
     }
   }
   if (Object.prototype.hasOwnProperty.call(next, "orderTag") || next.orderSource !== undefined) {
-    const meta = parseAnyOrderMeta(next.note ?? order.note);
+    const meta = parseMetaKeepingLegacyNote(next.note ?? order.note);
     if (Object.prototype.hasOwnProperty.call(next, "orderTag")) {
       meta.orderTag = typeof next.orderTag === "string" ? next.orderTag.trim() : "";
       delete next.orderTag;
@@ -1597,6 +1970,8 @@ const updateOrderInDB = async (id, payload) => {
     next.note = JSON.stringify({
       ...meta,
       __frontendOrder: meta.__frontendOrder ?? true,
+      // Items as first ordered, kept once so reports can tell them from later additions.
+      ...(meta.originalItems || !Array.isArray(meta.items) ? {} : { originalItems: meta.items }),
       items,
       ...totals,
       advance,
@@ -1641,14 +2016,15 @@ const updateOrderInDB = async (id, payload) => {
   return { ...withAssignmentUsers(plain), fraudGuard: await getFraudGuardForOrder(plain) };
 };
 
+// Orders can be assigned to any active staff account (admins included); customers are "user".
+const ASSIGNABLE_USER_CONDITIONS = [
+  db.sequelize.where(fn("LOWER", col("role")), { [Op.ne]: "user" }),
+  db.sequelize.where(fn("LOWER", col("status")), "active"),
+];
+
 const getAssignableEmployeesFromDB = async () => {
   const employees = await User.findAll({
-    where: {
-      [Op.and]: [
-        db.sequelize.where(fn("LOWER", col("role")), "employee"),
-        db.sequelize.where(fn("LOWER", col("status")), "active"),
-      ],
-    },
+    where: { [Op.and]: ASSIGNABLE_USER_CONDITIONS },
     attributes: ["Id", "FirstName", "LastName", "Email", "Phone", "role", "status"],
     order: [["FirstName", "ASC"], ["createdAt", "DESC"]],
     paranoid: true,
@@ -1675,14 +2051,13 @@ const bulkAssignOrdersToEmployeeInDB = async (orderIds = [], employeeId, actor =
     where: {
       [Op.and]: [
         { Id: Number(employeeId) },
-        db.sequelize.where(fn("LOWER", col("role")), "employee"),
-        db.sequelize.where(fn("LOWER", col("status")), "active"),
+        ...ASSIGNABLE_USER_CONDITIONS,
       ],
     },
     attributes: ["Id", "FirstName", "LastName", "Email", "Phone", "role", "status"],
     paranoid: true,
   });
-  if (!employee) throw new ApiError(404, "Active employee not found");
+  if (!employee) throw new ApiError(404, "Active staff user not found");
 
   const employeePlain = employee.get({ plain: true });
   const employeeName = getUserDisplayName(employeePlain);
@@ -2016,9 +2391,20 @@ const bulkSendOrdersToPathaoInDB = async (orderIds = [], options = {}) => {
   return { sent, skipped };
 };
 
+// A courier sync never moves a Return Received order back to returned/cancelled.
+const courierStatusUpdate = (order, orderStatus) => {
+  if (!orderStatus) return {};
+  if (order.status === ORDER_STATUS.RETURN_RECEIVED && ["returned", "cancelled"].includes(orderStatus)) return {};
+  return { status: orderStatus };
+};
+
 // Compare the snapshot so a slow provider response cannot overwrite a newer edit.
 const saveCourierSync = async (order, values, automatic) => {
   if (!automatic) return order.update(values);
+  // Bulk updates skip instance hooks, so record the status change here.
+  if (values.status && values.status !== order.status) {
+    values = { ...values, note: appendStatusHistory(values.note ?? order.note, order.status, values.status) };
+  }
   const [updated] = await Order.update(values, { where: {
     Id: order.Id, status: order.status, courier: order.courier, note: order.note,
   } });
@@ -2040,7 +2426,7 @@ const syncSteadfastStatusInDB = async (id, { automatic = false } = {}) => {
   const steadfastStatus = response?.delivery_status || response?.status_text || response?.status || "";
   const orderStatus = mapSteadfastStatusToOrderStatus(steadfastStatus);
   await saveCourierSync(order, {
-    ...(orderStatus ? { status: orderStatus } : {}),
+    ...courierStatusUpdate(order, orderStatus),
     courier: "Steadfast",
     note: mergeCourierMeta(order, "steadfast", {
       ...meta,
@@ -2085,7 +2471,7 @@ const syncPathaoStatusInDB = async (id, { automatic = false } = {}) => {
   const orderStatus = mapPathaoStatusToOrderStatus(pathaoStatus);
 
   await saveCourierSync(order, {
-    ...(orderStatus ? { status: orderStatus } : {}),
+    ...courierStatusUpdate(order, orderStatus),
     courier: "Pathao",
     note: mergeCourierMeta(order, "pathao", {
       ...meta,
@@ -2120,6 +2506,7 @@ const createSteadfastReturnRequestInDB = async (id, reason = "") => {
   await order.update({
     note: mergeCourierMeta(order, "steadfast", {
       ...meta,
+      returnReason: String(reason || "").trim() || meta.returnReason || null,
       lastReturnRequest: response,
     }),
   });
@@ -2144,7 +2531,7 @@ const updateOrderStatusInDB = async (id, status, actorUserId) => {
       title: "Order status updated",
       message: `${order.orderId || `Order #${order.Id}`} is now ${nextStatus}`,
       type: "order_status",
-      priority: ["cancelled", "returned", "incomplete"].includes(nextStatus) ? "high" : "normal",
+      priority: ["cancelled", ...RETURN_STATUSES, "incomplete"].includes(nextStatus) ? "high" : "normal",
       url: `/#page=orders&orderStatus=${encodeURIComponent(nextStatus)}`,
       data: { orderId: order.Id, invoiceId: order.orderId, status: nextStatus },
       excludeUserId: actorUserId,
@@ -2158,8 +2545,18 @@ const OrderService = {
   createStaffOrderInDB,
   saveIncompleteOrderInDB,
   getOrdersFromDB,
+  getOrderFilterOptionsFromDB,
+  getOrderReportFromDB,
+  getSalesSummaryFromDB,
+  getPackingListFromDB,
+  bulkOrderActionInDB,
+  sendSmsToOrdersInDB,
+  markOrdersPrintedInDB,
+  getPathaoCitiesFromProvider,
+  getPathaoZonesFromProvider,
   getOrderStatusCountsFromDB,
   getOrderByIdFromDB,
+  addOrderAttachmentInDB,
   trackOrdersByPhoneFromDB,
   getCustomerOrderHistoryFromDB,
   sendOrderReconfirmOtpInDB,

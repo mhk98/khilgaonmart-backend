@@ -285,7 +285,7 @@ const insertIntoDB = async (data, files = []) => {
   const {
     name, slug, sku,
     categoryId, subcategoryId, childcategoryId, brandId,
-    productVideo, advanceAmount, stockAlert,
+    productVideo, advanceAmount, stockAlert, rackNo,
     description, shortDescription,
     metaTitle, metaKeyword, metaDescription,
     giftTitle, giftPrice,
@@ -308,6 +308,7 @@ const insertIntoDB = async (data, files = []) => {
     productVideo:    productVideo    || null,
     advanceAmount:   advanceAmount   ? Number(advanceAmount)   : null,
     stockAlert:      stockAlert      ? Number(stockAlert)      : null,
+    rackNo:          rackNo          ? String(rackNo).trim()   : null,
     description:     description     || null,
     shortDescription:shortDescription|| null,
     metaTitle:       metaTitle       || null,
@@ -450,7 +451,7 @@ const updateOneFromDB = async (id, payload, files = []) => {
   const {
     name, slug, sku,
     categoryId, subcategoryId, childcategoryId, brandId,
-    productVideo, advanceAmount, stockAlert,
+    productVideo, advanceAmount, stockAlert, rackNo,
     description, shortDescription,
     metaTitle, metaKeyword, metaDescription,
     giftTitle, giftPrice,
@@ -483,6 +484,7 @@ const updateOneFromDB = async (id, payload, files = []) => {
       productVideo:    productVideo    || null,
       advanceAmount:   advanceAmount   ? Number(advanceAmount)   : null,
       stockAlert:      stockAlert      ? Number(stockAlert)      : null,
+      rackNo:          rackNo          ? String(rackNo).trim()   : null,
       description:     description     || null,
       shortDescription:shortDescription|| null,
       metaTitle:       metaTitle       || null,

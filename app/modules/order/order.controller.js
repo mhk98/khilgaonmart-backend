@@ -3,6 +3,7 @@ const sendResponse = require("../../../shared/sendResponse");
 const pick = require("../../../shared/pick");
 const OrderService = require("./order.service");
 const OrderFraudCheckService = require("./orderFraudCheck.service");
+const { ORDER_LIST_FILTER_KEYS } = require("./orderFilters");
 const TrackingService = require("../tracking/tracking.service");
 const { getClientIp } = require("../../utils/clientIp");
 
@@ -78,7 +79,14 @@ const saveIncompleteOrder = catchAsync(async (req, res) => {
 });
 
 const getOrders = catchAsync(async (req, res) => {
-  const filters = pick(req.query, ["status", "search", "fromDate", "toDate", "assignedEmployeeId"]);
+  const filters = pick(req.query, [
+    "status",
+    "search",
+    "fromDate",
+    "toDate",
+    "assignedEmployeeId",
+    ...ORDER_LIST_FILTER_KEYS,
+  ]);
   const paginationOptions = pick(req.query, ["page", "limit", "sortBy", "sortOrder"]);
   const result = await OrderService.getOrdersFromDB(filters, paginationOptions, req.user);
   sendResponse(res, {
@@ -87,6 +95,101 @@ const getOrders = catchAsync(async (req, res) => {
     message: "Orders fetched successfully",
     meta: result.meta,
     data: result.data,
+  });
+});
+
+const getOrderFilterOptions = catchAsync(async (req, res) => {
+  const result = await OrderService.getOrderFilterOptionsFromDB();
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Order filter options fetched successfully",
+    data: result,
+  });
+});
+
+const pickOrderListFilters = (query) =>
+  pick(query, ["status", "search", "fromDate", "toDate", "assignedEmployeeId", ...ORDER_LIST_FILTER_KEYS]);
+
+const getOrderReport = catchAsync(async (req, res) => {
+  const filters = pickOrderListFilters(req.query);
+  const result = await OrderService.getOrderReportFromDB(req.params.type, filters, req.user);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Order report fetched successfully",
+    data: result,
+  });
+});
+
+const getSalesSummary = catchAsync(async (req, res) => {
+  const result = await OrderService.getSalesSummaryFromDB(pickOrderListFilters(req.query), req.user);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Sales summary fetched successfully",
+    data: result,
+  });
+});
+
+const getPackingList = catchAsync(async (req, res) => {
+  const options = pick(req.query, ["groupBy", "includeReturns", "includeOtherProducts", "upsales", "createTimeOnly"]);
+  const result = await OrderService.getPackingListFromDB(pickOrderListFilters(req.query), options, req.user);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Packing list fetched successfully",
+    data: result,
+  });
+});
+
+const bulkOrderAction = catchAsync(async (req, res) => {
+  const result = await OrderService.bulkOrderActionInDB(req.body, req.user);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: `${result.updated} order(s) updated`,
+    data: result,
+  });
+});
+
+const sendSmsToOrders = catchAsync(async (req, res) => {
+  const result = await OrderService.sendSmsToOrdersInDB(req.body);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: result.message,
+    data: result,
+  });
+});
+
+const markOrdersPrinted = catchAsync(async (req, res) => {
+  const result = await OrderService.markOrdersPrintedInDB(req.body.orderIds);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Orders marked as printed",
+    data: result,
+  });
+});
+
+const getPathaoCities = catchAsync(async (req, res) => {
+  const result = await OrderService.getPathaoCitiesFromProvider();
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Pathao cities fetched successfully",
+    data: result,
+  });
+});
+
+const getPathaoZones = catchAsync(async (req, res) => {
+  const result = await OrderService.getPathaoZonesFromProvider(req.params.cityId);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Pathao zones fetched successfully",
+    data: result,
   });
 });
 
@@ -106,6 +209,16 @@ const getOrderById = catchAsync(async (req, res) => {
     statusCode: 200,
     success: true,
     message: "Order fetched successfully",
+    data: result,
+  });
+});
+
+const addOrderAttachment = catchAsync(async (req, res) => {
+  const result = await OrderService.addOrderAttachmentInDB(req.params.id, req.file, req.user);
+  sendResponse(res, {
+    statusCode: 200,
+    success: true,
+    message: "Attachment added",
     data: result,
   });
 });
@@ -326,7 +439,17 @@ const OrderController = {
   saveIncompleteOrder,
   getOrders,
   getOrderStatusCounts,
+  getOrderFilterOptions,
+  getOrderReport,
+  getSalesSummary,
+  getPackingList,
+  bulkOrderAction,
+  sendSmsToOrders,
+  markOrdersPrinted,
+  getPathaoCities,
+  getPathaoZones,
   getOrderById,
+  addOrderAttachment,
   getOrderFraudCheck,
   getAssignableEmployees,
   bulkAssignOrdersToEmployee,
