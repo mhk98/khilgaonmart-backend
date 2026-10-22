@@ -62,7 +62,7 @@ if (missingEnvVars.length) {
   process.exit(1);
 }
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 5000;
 
 /* ========================
    SECURITY HEADERS
@@ -90,8 +90,6 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:5173",
-  "https://holydeen.com",
-  "https://admin.holydeen.com",
 ];
 
 const ALLOWED_ORIGINS = new Set(
